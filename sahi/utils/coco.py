@@ -1,6 +1,13 @@
 # OBSS SAHI Tool
 # Code written by Fatih C Akyon, 2020.
 # Modified by Sinan O Altinuc, 2020.
+try:
+    from pycocotools import mask as mask_utils
+    import cv2
+
+    use_rle = True
+except ImportError:
+    use_rle = False
 
 import copy
 import logging
@@ -128,13 +135,16 @@ class CocoAnnotation:
             annotation_dict: dict
                 COCO formatted annotation dict (with fields "bbox", "segmentation", "category_id")
         """
-        if annotation_dict.__contains__("segmentation") and not isinstance(annotation_dict["segmentation"], list):
-            has_rle_segmentation = True
-            logger.warning(
-                f"Segmentation annotation for id {annotation_dict['id']} is skipped since RLE segmentation format is not supported."
-            )
-        else:
+        has_rle_segmentation = annotation_dict.__contains__("segmentation") and not isinstance(annotation_dict["segmentation"], list)
+
+        if use_rle and has_rle_segmentation:
+            # convert RLE to polygons: depend on opencv and pycocotools
+            annotation_dict["segmentation"] = cls.convert_rle_to_polygons(self._segmentation, self._segmentation.get('size')[0], self._segmentation.get('size')[1])
             has_rle_segmentation = False
+        elif has_rle_segmentation:
+            logger.warning(
+                f"Segmentation annotation for id {annotation_dict['id']} is skipped since RLE segmentation format is not supported without pycocotools and opencv"
+            )
 
         if (
             annotation_dict.__contains__("segmentation")
@@ -215,6 +225,16 @@ class CocoAnnotation:
         self._image_id = image_id
         self._iscrowd = iscrowd
 
+
+        has_rle_segmentation = self._segmentation is not None and not isinstance(self._segmentation, list)
+
+        if use_rle and has_rle_segmentation:
+            self._segmentation = self.convert_rle_to_polygons(self._segmentation, self._segmentation.get('size')[0], self._segmentation.get('size')[1])
+            has_rle_segmentation = False
+        elif has_rle_segmentation:
+            logger.warning(
+                f"Segmentation annotation is skipped since RLE segmentation format is not supported without pycocotools and opencv"
+            )
         if self._segmentation:
             shapely_annotation = ShapelyAnnotation.from_coco_segmentation(segmentation=self._segmentation)
         else:
@@ -230,6 +250,18 @@ class CocoAnnotation:
             category_name=self.category_name,
             iscrowd=self.iscrowd,
         )
+    
+    @staticmethod
+    def convert_rle_to_polygons(rle:Dict):
+        # convert RLE to polygons: depend on opencv and pycocotools
+        compressed_rle = mask_utils.frPyObjects(rle, rle.get('size')[0], rle.get('size')[1])
+        binary_mask = mask_utils.decode(compressed_rle)
+        contours, _ = cv2.findContours(binary_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        poly_segmentation = []
+        for contour in contours:
+            if contour.size >= 2*3:  # Valid polygon has at least 3 points
+                poly_segmentation.append(contour.flatten().tolist())
+        return poly_segmentation
 
     @property
     def area(self):
@@ -251,6 +283,7 @@ class CocoAnnotation:
         Returns coco formatted segmentation of the annotation as [[1, 1, 325, 125, 250, 200, 5, 200]]
         """
         if self._segmentation:
+            assert all([len(seg) > 0 for seg in  self._shapely_annotation.to_coco_segmentation()]), "Some segmentation return empty"
             return self._shapely_annotation.to_coco_segmentation()
         else:
             return []
